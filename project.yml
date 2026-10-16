@@ -8,7 +8,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    TARGETED_DEVICE_FAMILY: "1" # iPhone only
+    TARGETED_DEVICE_FAMILY: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     GENERATE_INFOPLIST_FILE: YES
     CURRENT_PROJECT_VERSION: "1"
@@ -19,6 +19,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGN_IDENTITY: ""
+    CODE_SIGN_STYLE: Manual
 
 targets:
   LibrusPlus:
