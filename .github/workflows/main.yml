@@ -38,8 +38,8 @@ jobs:
           xcodebuild clean build \
             -project LibrusPlus.xcodeproj \
             -scheme LibrusPlus \
+            -destination "generic/platform=iOS" \
             -configuration Release \
-            -sdk iphoneos \
             -derivedDataPath "build" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
