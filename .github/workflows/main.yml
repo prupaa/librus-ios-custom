@@ -33,22 +33,23 @@ jobs:
         run: |
           xcodegen generate
 
-      - name: Budowanie archiwum (xcodebuild archive)
+      - name: Budowanie aplikacji (xcodebuild build)
         run: |
-          xcodebuild clean archive \
+          xcodebuild clean build \
             -project LibrusPlus.xcodeproj \
             -scheme LibrusPlus \
             -configuration Release \
             -sdk iphoneos \
-            -archivePath "build/LibrusPlus.xcarchive" \
-            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath "build" \
+            CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE="Manual"
 
       - name: Tworzenie pliku .ipa (Payload)
         run: |
           mkdir -p Payload
-          cp -r "build/LibrusPlus.xcarchive/Products/Applications/LibrusPlus.app" Payload/
+          cp -r build/Build/Products/Release-iphoneos/LibrusPlus.app Payload/
           zip -r -q LibrusPlus.ipa Payload
           echo "Pomyślnie wygenerowano LibrusPlus.ipa"
           ls -lh LibrusPlus.ipa
