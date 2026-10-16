@@ -24,6 +24,9 @@ public struct AttendanceView: View {
                 }
                 .padding()
             }
+            .refreshable {
+                await appState.syncWithLibrus()
+            }
             .navigationTitle("Frekwencja")
             .sheet(item: $selectedSubjectForDetail) { subj in
                 SubjectAttendanceDetailView(appState: appState, subject: subj)

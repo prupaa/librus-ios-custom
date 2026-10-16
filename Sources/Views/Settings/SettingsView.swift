@@ -3,13 +3,91 @@ import PhotosUI
 
 public struct SettingsView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject private var librusService = LibrusService.shared
     @State private var selectedPhotoItem: PhotosPickerItem? = nil
     @State private var showingResetBgAlert: Bool = false
     @State private var showingTestNotificationAlert: Bool = false
+    @State private var showingLoginSheet: Bool = false
 
     public var body: some View {
         NavigationStack {
             Form {
+                // SEKCJA 0: KONTO LIBRUS SYNERGIA
+                Section(header: Text("Konto Librus")) {
+                    if librusService.isAuthenticated, let profile = librusService.currentUser {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "person.crop.circle.badge.checkmark")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(appState.selectedTheme.color)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.studentName)
+                                        .font(.headline)
+                                    Text("\(profile.className) • \(profile.schoolName)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+
+                            if let lastSync = librusService.lastSyncDate {
+                                Text("Ostatnia synchronizacja: \(lastSync.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Button {
+                            Task {
+                                await appState.syncWithLibrus()
+                            }
+                        } label: {
+                            HStack {
+                                if librusService.isSyncing {
+                                    ProgressView()
+                                        .padding(.trailing, 4)
+                                    Text("Synchronizuję dane...")
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .foregroundColor(appState.selectedTheme.color)
+                                    Text("Synchronizuj z Librusem teraz")
+                                }
+                            }
+                        }
+                        .disabled(librusService.isSyncing)
+
+                        Button(role: .destructive) {
+                            librusService.logout()
+                        } label: {
+                            Label("Wyloguj z Librusa", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } else {
+                        Button {
+                            showingLoginSheet = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "key.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(appState.selectedTheme.color)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Zaloguj się do Librusa")
+                                        .font(.headline)
+                                        .foregroundColor(.primary)
+                                    Text("Pobieraj swoje prawdziwe oceny, nieobecności i plan lekcji")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
                 // SEKCJA 1: PERSONALIZACJA WYGLĄDU I TŁA
                 Section(header: Text("Personalizacja i Motyw")) {
                     Picker("Kolor przewodni", selection: $appState.selectedTheme) {
@@ -172,6 +250,9 @@ public struct SettingsView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text("Zablokuj ekran lub przejdź do ekranu głównego, aby zobaczyć powiadomienie na banerze.")
+            }
+            .sheet(isPresented: $showingLoginSheet) {
+                LibrusLoginView(appState: appState)
             }
             .customAppBackground(appState: appState)
         }

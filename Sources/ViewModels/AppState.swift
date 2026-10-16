@@ -20,6 +20,9 @@ public final class AppState: ObservableObject {
     @Published public var backgroundDimOpacity: Double = 0.35
     @Published public var backgroundBlurRadius: Double = 3.0
 
+    // Stan synchronizacji Librus
+    @Published public var isSyncingLibrus: Bool = false
+
     // Klucze UserDefaults do trwałego zapisu
     private let kSubjectsKey = "LibrusPlus_Subjects"
     private let kGradesKey = "LibrusPlus_Grades"
@@ -229,6 +232,13 @@ public final class AppState: ObservableObject {
     public func setBackgroundImage(data: Data?) {
         self.backgroundImageData = data
         saveData()
+    }
+
+    /// Ręczna synchronizacja danych z serwerami Librus
+    public func syncWithLibrus() async {
+        isSyncingLibrus = true
+        await LibrusService.shared.syncData(appState: self)
+        isSyncingLibrus = false
     }
 
     // MARK: - Trwały Zapis i Odczyt (Persistence)

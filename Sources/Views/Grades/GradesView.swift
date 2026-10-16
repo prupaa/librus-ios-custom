@@ -21,6 +21,9 @@ public struct GradesView: View {
                 }
                 .padding()
             }
+            .refreshable {
+                await appState.syncWithLibrus()
+            }
             .navigationTitle("Oceny")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {

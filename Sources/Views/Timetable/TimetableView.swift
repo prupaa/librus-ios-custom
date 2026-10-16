@@ -48,6 +48,9 @@ public struct TimetableView: View {
                     }
                     .padding()
                 }
+                .refreshable {
+                    await appState.syncWithLibrus()
+                }
             }
             .navigationTitle("Plan Lekcji")
             .toolbar {

@@ -48,6 +48,9 @@ public struct MessagesView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .refreshable {
+                        await appState.syncWithLibrus()
+                    }
                 }
             }
             .searchable(text: $searchText, prompt: "Szukaj w wiadomościach...")
