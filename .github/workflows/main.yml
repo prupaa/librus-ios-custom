@@ -1,0 +1,61 @@
+name: Zbuduj aplikację iOS (.ipa)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Kompilacja i pakowanie pliku IPA
+    runs-on: macos-14
+
+    steps:
+      - name: Pobieranie kodu repozytorium
+        uses: actions/checkout@v4
+
+      - name: Konfiguracja Xcode
+        run: |
+          if [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app
+          elif [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          fi
+          xcodebuild -version
+
+      - name: Instalacja XcodeGen
+        run: |
+          brew install xcodegen
+
+      - name: Generowanie projektu Xcode
+        run: |
+          xcodegen generate
+
+      - name: Budowanie archiwum (xcodebuild archive)
+        run: |
+          xcodebuild clean archive \
+            -project LibrusPlus.xcodeproj \
+            -scheme LibrusPlus \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "build/LibrusPlus.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Tworzenie pliku .ipa (Payload)
+        run: |
+          mkdir -p Payload
+          cp -r "build/LibrusPlus.xcarchive/Products/Applications/LibrusPlus.app" Payload/
+          zip -r -q LibrusPlus.ipa Payload
+          echo "Pomyślnie wygenerowano LibrusPlus.ipa"
+          ls -lh LibrusPlus.ipa
+
+      - name: Przesłanie pliku .ipa jako artefakt do pobrania
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibrusPlus-iOS-18-Sideload
+          path: LibrusPlus.ipa
+          retention-days: 14
