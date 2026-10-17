@@ -42,6 +42,24 @@ public final class LibrusService: NSObject, ObservableObject, URLSessionTaskDele
         self.lastSyncDate = UserDefaults.standard.object(forKey: kLastSyncKey) as? Date
     }
 
+    // MARK: - URLSessionTaskDelegate (Przechwytywanie przekierowań 302 jak w axios maxRedirects: 0)
+
+    nonisolated public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        if let url = task.originalRequest?.url?.absoluteString,
+           url.contains("loguj") || url.contains("OAuth") || url.contains("Authorization") {
+            // Zatrzymujemy automatyczne przekierowanie, aby odczytać nagłówek Location
+            completionHandler(nil)
+        } else {
+            completionHandler(request)
+        }
+    }
+
     // MARK: - Autoryzacja Librus (Zgodna z Mati365/librus-api)
 
     public func login(login: String, password pass: String) async -> Bool {

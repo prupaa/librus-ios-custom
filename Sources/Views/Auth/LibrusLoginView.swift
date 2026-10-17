@@ -110,18 +110,30 @@ public struct LibrusLoginView: View {
                         }
                         .disabled(isLoggingIn || loginText.isEmpty || passwordText.isEmpty)
 
+                        Divider()
+                            .padding(.vertical, 4)
+
                         // Alternatywna metoda: Logowanie przez stronę www
-                        Button {
-                            isShowingWebView = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "safari")
-                                Text("Zaloguj przez Portal Librus (Web)")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
+                        VStack(spacing: 6) {
+                            Text("Logujesz się e-mailem (Konto Librus / Rodzina)?")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+
+                            Button {
+                                isShowingWebView = true
+                            } label: {
+                                HStack {
+                                    Image(systemName: "safari.fill")
+                                    Text("Zaloguj przez Portal Librus (Web)")
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .background(appState.selectedTheme.color.opacity(0.12))
+                                .foregroundColor(appState.selectedTheme.color)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
                             }
-                            .foregroundColor(appState.selectedTheme.color)
-                            .padding(.top, 4)
                         }
                     }
                     .padding()
@@ -182,13 +194,15 @@ public struct LibrusWebLoginSheet: View {
     public var body: some View {
         NavigationStack {
             LibrusWebView(onSuccess: {
-                Task {
-                    _ = await LibrusService.shared.login(login: "Uczeń Librus", password: "authenticated_via_web")
+                Task { @MainActor in
+                    LibrusService.shared.isAuthenticated = true
+                    UserDefaults.standard.set(true, forKey: "Librus_IsAuthenticated")
+                    await appState.syncWithLibrus()
                     onLoginSuccess()
                     dismiss()
                 }
             })
-            .navigationTitle("Logowanie Librus Portal")
+            .navigationTitle("Logowanie Portal Librus")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -229,9 +243,14 @@ public struct LibrusWebView: UIViewRepresentable {
 
         public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             if let url = webView.url?.absoluteString {
-                // Po udanym zalogowaniu Librus przekierowuje do synergia.librus.pl lub panelu ucznia
+                // Po udanym zalogowaniu Librus przekierowuje do panelu Synergii
                 if url.contains("synergia.librus.pl") && !url.contains("loguj") {
-                    parent.onSuccess()
+                    webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                        for cookie in cookies {
+                            HTTPCookieStorage.shared.setCookie(cookie)
+                        }
+                        self.parent.onSuccess()
+                    }
                 }
             }
         }
