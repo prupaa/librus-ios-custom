@@ -9,7 +9,7 @@ public struct LibrusProfile: Codable {
 }
 
 @MainActor
-public final class LibrusService: ObservableObject {
+public final class LibrusService: NSObject, ObservableObject, URLSessionTaskDelegate {
     public static let shared = LibrusService()
 
     @Published public var isAuthenticated: Bool = false
@@ -22,7 +22,18 @@ public final class LibrusService: ObservableObject {
     private let kProfileKey = "Librus_UserProfile"
     private let kLastSyncKey = "Librus_LastSyncDate"
 
-    private init() {
+    private let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+
+    private var session: URLSession!
+
+    private override init() {
+        super.init()
+        let config = URLSessionConfiguration.default
+        config.httpCookieStorage = HTTPCookieStorage.shared
+        config.httpShouldSetCookies = true
+        config.httpCookieAcceptPolicy = .always
+        self.session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+
         self.isAuthenticated = UserDefaults.standard.bool(forKey: kIsAuthKey)
         if let data = UserDefaults.standard.data(forKey: kProfileKey),
            let profile = try? JSONDecoder().decode(LibrusProfile.self, from: data) {
@@ -31,70 +42,141 @@ public final class LibrusService: ObservableObject {
         self.lastSyncDate = UserDefaults.standard.object(forKey: kLastSyncKey) as? Date
     }
 
-    /// Logowanie do systemu Synergia Librus
-    public func login(login: String, password: String) async -> Bool {
+    // MARK: - Autoryzacja Librus (Zgodna z Mati365/librus-api)
+
+    public func login(login: String, password pass: String) async -> Bool {
         isSyncing = true
         errorMessage = nil
 
-        // Symulacja autoryzacji z endpointem Librusa
-        // W prawdziwym środowisku wykonuje zapytanie POST na https://api.librus.pl/OAuth/Authorization
-        // lub https://synergia.librus.pl/loguj/zaawansowane
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        do {
+            // Krok 1: GET https://synergia.librus.pl/loguj/portalRodzina
+            guard let portalUrl = URL(string: "https://synergia.librus.pl/loguj/portalRodzina") else {
+                throw NSError(domain: "Librus", code: -1, userInfo: [NSLocalizedDescriptionKey: "Błędny URL portalu"])
+            }
+            var req1 = URLRequest(url: portalUrl)
+            req1.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req1.setValue("https://portal.librus.pl/", forHTTPHeaderField: "Referer")
 
-        guard !login.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty else {
-            errorMessage = "Wprowadź poprawny login i hasło"
-            isSyncing = false
+            let (r1Data, r1Resp) = try await session.data(for: req1)
+            let authRedirectUrl = try getRedirectLocation(from: r1Resp, fallbackBase: portalUrl)
+
+            // Krok 2: GET authorizationUrl
+            var req2 = URLRequest(url: authRedirectUrl)
+            req2.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req2.setValue(portalUrl.absoluteString, forHTTPHeaderField: "Referer")
+
+            let (_, r2Resp) = try await session.data(for: req2)
+            let loginFormUrl = try getRedirectLocation(from: r2Resp, fallbackBase: authRedirectUrl)
+
+            // Krok 3: GET loginFormUrl
+            var req3 = URLRequest(url: loginFormUrl)
+            req3.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req3.setValue(authRedirectUrl.absoluteString, forHTTPHeaderField: "Referer")
+            _ = try await session.data(for: req3)
+
+            // Krok 4: POST credentials z nagłówkiem x-baner
+            var req4 = URLRequest(url: loginFormUrl)
+            req4.httpMethod = "POST"
+            req4.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req4.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            req4.setValue("application/json, text/javascript, */*; q=0.01", forHTTPHeaderField: "Accept")
+            req4.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req4.setValue(makeBannerHeader(), forHTTPHeaderField: "x-baner")
+            req4.setValue(loginFormUrl.absoluteString, forHTTPHeaderField: "Referer")
+            req4.setValue("https://api.librus.pl", forHTTPHeaderField: "Origin")
+
+            let postParams = "action=login&login=\(urlEncode(login))&pass=\(urlEncode(pass))"
+            req4.httpBody = postParams.data(using: .utf8)
+
+            let (loginData, loginResp) = try await session.data(for: req4)
+
+            // Sprawdzamy odpowiedź JSON lub Location
+            var continuationUrl: URL? = nil
+            if let httpResp = loginResp as? HTTPURLResponse, let loc = httpResp.value(forHTTPHeaderField: "Location"), let u = URL(string: loc, relativeTo: loginFormUrl) {
+                continuationUrl = u.absoluteURL
+            } else if let json = try? JSONSerialization.jsonObject(with: loginData) as? [String: Any] {
+                if let status = json["status"] as? String, status == "ok", let goTo = json["goTo"] as? String {
+                    continuationUrl = URL(string: goTo, relativeTo: loginFormUrl)?.absoluteURL
+                } else if let msg = json["message"] as? String {
+                    throw NSError(domain: "Librus", code: 401, userInfo: [NSLocalizedDescriptionKey: msg])
+                }
+            }
+
+            guard let finalContinuation = continuationUrl else {
+                throw NSError(domain: "Librus", code: 401, userInfo: [NSLocalizedDescriptionKey: "Nieprawidłowy login lub hasło do Librusa."])
+            }
+
+            // Krok 5: Podążanie za łańcuchem autoryzacji (OAuth chain) do synergia.librus.pl
+            try await followOAuthChain(startUrl: finalContinuation)
+
+            // Krok 6: Pobieranie profilu ucznia
+            let profile = await fetchStudentProfile(defaultLogin: login)
+
+            self.currentUser = profile
+            self.isAuthenticated = true
+            self.lastSyncDate = Date()
+            self.isSyncing = false
+
+            UserDefaults.standard.set(true, forKey: kIsAuthKey)
+            if let encoded = try? JSONEncoder().encode(profile) {
+                UserDefaults.standard.set(encoded, forKey: kProfileKey)
+            }
+            UserDefaults.standard.set(Date(), forKey: kLastSyncKey)
+
+            return true
+        } catch {
+            self.errorMessage = error.localizedDescription
+            self.isSyncing = false
             return false
         }
-
-        // Ustawienie profilu użytkownika
-        let studentDisplay = login.contains("@") ? String(login.split(separator: "@").first ?? "Uczeń") : login
-        let profile = LibrusProfile(
-            studentName: studentDisplay.capitalized,
-            schoolName: "Liceum Ogólnokształcące / Technikum",
-            className: "Klasa 3B",
-            login: login
-        )
-
-        self.currentUser = profile
-        self.isAuthenticated = true
-        self.lastSyncDate = Date()
-        self.isSyncing = false
-
-        // Zapis stanu
-        UserDefaults.standard.set(true, forKey: kIsAuthKey)
-        if let encoded = try? JSONEncoder().encode(profile) {
-            UserDefaults.standard.set(encoded, forKey: kProfileKey)
-        }
-        UserDefaults.standard.set(Date(), forKey: kLastSyncKey)
-
-        return true
     }
 
-    /// Pobieranie i synchronizacja najświeższych danych z konta
+    // MARK: - Synchronizacja Danych z Librusem
+
     public func syncData(appState: AppState) async {
         guard isAuthenticated else { return }
         isSyncing = true
 
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        do {
+            // 1. Pobierz Oceny
+            if let gradesHtml = try? await fetchHTML(from: "https://synergia.librus.pl/przegladaj_oceny/uczen") {
+                let parsedGrades = LibrusHTMLParser.shared.parseGrades(html: gradesHtml)
+                if !parsedGrades.isEmpty {
+                    applyParsedGrades(parsedGrades, to: appState)
+                }
+            }
 
-        // Odśwież datę ostatniej synchronizacji
-        let now = Date()
-        self.lastSyncDate = now
-        UserDefaults.standard.set(now, forKey: kLastSyncKey)
+            // 2. Pobierz Plan Lekcji
+            if let timetableHtml = try? await fetchHTML(from: "https://synergia.librus.pl/przegladaj_plan_lekcji") {
+                let parsedLessons = LibrusHTMLParser.shared.parseTimetable(html: timetableHtml)
+                if !parsedLessons.isEmpty {
+                    applyParsedLessons(parsedLessons, to: appState)
+                }
+            }
 
-        // Wywołaj powiadomienie o udanej synchronizacji
-        if appState.notificationSettings.isEnabled {
-            NotificationManager.shared.sendLocalNotification(
-                title: "Librus+: Zsynchronizowano",
-                body: "Dane o ocenach, frekwencji i planie lekcji są aktualne."
-            )
+            // 3. Pobierz Wiadomości
+            if let msgHtml = try? await fetchHTML(from: "https://synergia.librus.pl/wiadomosci") {
+                let parsedMessages = LibrusHTMLParser.shared.parseMessages(html: msgHtml)
+                if !parsedMessages.isEmpty {
+                    applyParsedMessages(parsedMessages, to: appState)
+                }
+            }
+
+            let now = Date()
+            self.lastSyncDate = now
+            UserDefaults.standard.set(now, forKey: kLastSyncKey)
+
+            if appState.notificationSettings.isEnabled {
+                NotificationManager.shared.sendLocalNotification(
+                    title: "Librus+: Zsynchronizowano",
+                    body: "Pobrano aktualne oceny, plan lekcji i wiadomości z Synergii."
+                )
+            }
         }
 
         self.isSyncing = false
     }
 
-    /// Wylogowanie z konta Librus
     public func logout() {
         self.isAuthenticated = false
         self.currentUser = nil
@@ -104,8 +186,165 @@ public final class LibrusService: ObservableObject {
         UserDefaults.standard.removeObject(forKey: kProfileKey)
         UserDefaults.standard.removeObject(forKey: kLastSyncKey)
 
-        // Czyszczenie ciasteczek sesji WKWebView
-        HTTPCookieStorage.shared.removeCookies(since: Date.distantPast)
-        WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: Date.distantPast) {}
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            for cookie in cookies {
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+            }
+        }
+    }
+
+    // MARK: - Pomocnicze Mechanizmy API Mati365
+
+    /// Generowanie nagłówka x-baner z przesunięciem o 20 znaków Unicode
+    private func makeBannerHeader() -> String {
+        let shift: (String) -> String = { text in
+            let scalars = text.unicodeScalars.compactMap { scalar -> Character? in
+                guard let newScalar = UnicodeScalar(scalar.value + 20) else { return nil }
+                return Character(newScalar)
+            }
+            return String(scalars)
+        }
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let random = Int.random(in: 100000...999999)
+        return "\(shift(String(random))):\(shift(String(timestamp)))"
+    }
+
+    private func getRedirectLocation(from response: URLResponse, fallbackBase: URL) throws -> URL {
+        if let http = response as? HTTPURLResponse, let loc = http.value(forHTTPHeaderField: "Location"), let url = URL(string: loc, relativeTo: fallbackBase) {
+            return url.absoluteURL
+        }
+        throw NSError(domain: "Librus", code: -1, userInfo: [NSLocalizedDescriptionKey: "Brak przekierowania autoryzacji Librusa."])
+    }
+
+    private func followOAuthChain(startUrl: URL) async throws {
+        var currentUrl = startUrl
+        for _ in 0..<10 {
+            var req = URLRequest(url: currentUrl)
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            let (_, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse, let loc = http.value(forHTTPHeaderField: "Location"), let next = URL(string: loc, relativeTo: currentUrl) {
+                currentUrl = next.absoluteURL
+            } else {
+                return // Dotarliśmy do końcowej strony sesji
+            }
+        }
+    }
+
+    private func fetchHTML(from urlString: String) async throws -> String {
+        guard let url = URL(string: urlString) else { return "" }
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("https://synergia.librus.pl/uczen_index", forHTTPHeaderField: "Referer")
+        let (data, _) = try await session.data(for: req)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func fetchStudentProfile(defaultLogin: String) async -> LibrusProfile {
+        if let html = try? await fetchHTML(from: "https://synergia.librus.pl/informacja"),
+           let info = LibrusHTMLParser.shared.parseStudentInfo(html: html) {
+            return LibrusProfile(
+                studentName: info.name,
+                schoolName: info.school,
+                className: info.className,
+                login: defaultLogin
+            )
+        }
+        return LibrusProfile(
+            studentName: defaultLogin.capitalized,
+            schoolName: "Szkoła",
+            className: "Klasa",
+            login: defaultLogin
+        )
+    }
+
+    private func urlEncode(_ str: String) -> String {
+        str.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? str
+    }
+
+    // MARK: - Aplikowanie Danych do AppState
+
+    private func applyParsedGrades(_ items: [ParsedGradeItem], to appState: AppState) {
+        // Mapowanie przedmiotów
+        var subjectMap: [String: String] = [:] // Name -> ID
+        for s in appState.subjects { subjectMap[s.name] = s.id }
+
+        for item in items {
+            if subjectMap[item.subjectName] == nil {
+                let newSubj = Subject(name: item.subjectName, teacher: "Nauczyciel", defaultRoom: "")
+                appState.subjects.append(newSubj)
+                subjectMap[item.subjectName] = newSubj.id
+            }
+        }
+
+        // Mapowanie ocen
+        var newGrades: [Grade] = []
+        for item in items {
+            guard let sId = subjectMap[item.subjectName] else { continue }
+            newGrades.append(Grade(
+                subjectId: sId,
+                value: item.value,
+                displayValue: item.displayValue,
+                weight: item.weight,
+                category: item.category,
+                date: item.date,
+                comment: item.comment
+            ))
+        }
+
+        if !newGrades.isEmpty {
+            appState.grades = newGrades
+            appState.saveData()
+        }
+    }
+
+    private func applyParsedLessons(_ items: [ParsedLessonItem], to appState: AppState) {
+        var subjectMap: [String: String] = [:]
+        for s in appState.subjects { subjectMap[s.name] = s.id }
+
+        var newLessons: [Lesson] = []
+        for item in items {
+            let sId = subjectMap[item.subjectName] ?? {
+                let ns = Subject(name: item.subjectName, teacher: item.teacher, defaultRoom: item.room)
+                appState.subjects.append(ns)
+                subjectMap[item.subjectName] = ns.id
+                return ns.id
+            }()
+
+            newLessons.append(Lesson(
+                subjectId: sId,
+                dayOfWeek: item.dayOfWeek,
+                lessonIndex: item.lessonIndex,
+                startTime: item.startTime,
+                endTime: item.endTime,
+                room: item.room,
+                teacher: item.teacher,
+                breakAfterMinutes: item.breakMinutes
+            ))
+        }
+
+        if !newLessons.isEmpty {
+            appState.lessons = newLessons
+            appState.saveData()
+        }
+    }
+
+    private func applyParsedMessages(_ items: [ParsedMessageItem], to appState: AppState) {
+        var newMsgs: [SchoolMessage] = []
+        for item in items {
+            newMsgs.append(SchoolMessage(
+                sender: item.sender,
+                recipient: "Uczeń (Ty)",
+                subject: item.subject,
+                body: item.body,
+                date: item.date,
+                isRead: item.isRead,
+                isSentByUser: false
+            ))
+        }
+
+        if !newMsgs.isEmpty {
+            appState.messages = newMsgs
+            appState.saveData()
+        }
     }
 }
